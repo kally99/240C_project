@@ -1,0 +1,110 @@
+---
+title: "genetics_240C"
+author: "Qiyu Wang"
+date: "2023-11-20"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+library(caret)
+library(splitTools)
+library(tidyverse)
+library(FactoMineR)
+library(factoextra)
+library(ggplot2)
+library(glmnet)
+library(rpart)
+library(rpart.plot)
+library(e1071)
+library(neuralnet)
+library(h2o)
+h2o.init()
+```
+
+## Date Preprocessing
+```{r load data}
+load("high_PCE_CAD_data.RData")
+```
+
+```{r basic cleaning}
+# take genetic cols and diabete (response) col
+df.genetics <- dat[, c(1: 531, 573)]
+# remove problematic columns
+df.genetics <- base::Filter(function(x) all(x %in% c(0, 1, 2)), df.genetics)
+# factorize
+for (j in 1:ncol(df.genetics)){
+  df.genetics[, j] <- factor(df.genetics[, j])
+}
+summary(df.genetics$Diabetes)
+```
+
+```{r MCA}
+# use MCA to reduce dimension for categorical data
+res.mca <- MCA(df.genetics[, 1: 115], graph = FALSE)
+ggplot(mapping = aes(x = seq(1:230), y = res.mca$eig[,3])) + 
+  geom_line(colour = "blue") +
+  geom_point(size = 0.1, colour = "darkred") +
+  ylab("% variance explained") + xlab("Dimension")
+```
+
+```{r split sets}
+# 80% training set and 20% testing set, split equally on diabetes
+split <- partition(df.genetics$Diabetes, 
+                   p = c(train = 0.8, test = 0.2))
+df.genetics.train <- df.genetics[split$train, ]
+df.genetics.test <- df.genetics[split$test, ]
+# validation split
+K <- 5
+cvSplit <- createFolds(df.genetics.train$Diabetes, k = K)
+```
+
+```{r logistic regression with no penalty}
+val.accuracy <- c()
+for (k in 1: K){
+  glm.cv <- glm(Diabetes~., 
+                data = df.genetics.train[-cvSplit[[k]], ],
+                family = "binomial")
+  pred.cv <- predict(glm.cv, 
+                     newdata = df.genetics.train[cvSplit[[k]], ], 
+                     type = "response")
+  pred.cv <- as.numeric(pred.cv >= 0.5)
+  val.accuracy <- c(val.accuracy, sum(pred.cv == df.genetics.train[cvSplit[[k]], ]$Diabetes)/nrow(df.genetics.train[cvSplit[[k]], ]))
+}
+paste("Logistic Regression: ", val.accuracy)
+```
+
+```{r logistic regression with l1 penalty}
+val.accuracy <- c()
+for (k in 1: K){
+  glmnet.cv <- glmnet(x = df.genetics.train[-cvSplit[[k]], ][, 1: 115], 
+                y = df.genetics.train[-cvSplit[[k]], "Diabetes"],
+                family = "binomial",
+                alpha = 1)
+  pred.cv <- predict(glmnet.cv, 
+                     newx = data.matrix(df.genetics.train[cvSplit[[k]], ][, 1:115]),
+                     type = "response")
+  pred.cv <- as.numeric(pred.cv >= 0.5)
+  val.accuracy <- c(val.accuracy, sum(pred.cv == df.genetics.train[cvSplit[[k]], ]$Diabetes)/nrow(df.genetics.train[cvSplit[[k]], ]))
+}
+paste("Logistic Regression: ", val.accuracy)
+```
+
+```{r tree}
+val.accuracy <- c()
+for (k in 1: K){
+  glm.cv <- rpart(Diabetes~., 
+                data = df.genetics.train[-cvSplit[[k]], ])
+  pred.cv <- predict(glm.cv, 
+                     newdata = df.genetics.train[cvSplit[[k]], ])
+}
+```
+
+```{r cnn}
+#. transform to dummy
+df.genetics.train.h2o <- as.h2o(df.genetics.train)
+df.genetics.test.h2o <- as.h2o(df.genetics.test)
+cnn1 <- h2o.deeplearning(x = 1:115, y = 116, training_frame = df.genetics.train.h2o,
+                        loss = "CrossEntropy", hidden = rep(5,5,5,5),
+                        score_training_samples = 0,
+                        epochs = 10)
+```
