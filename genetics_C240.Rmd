@@ -12,15 +12,11 @@ library(tidyverse)
 library(FactoMineR)
 library(factoextra)
 library(ggplot2)
-library(glmnet)
 library(rpart)
 library(rpart.plot)
-library(e1071)
-library(neuralnet)
-library(h2o)
 library(randomForest)
 library(MASS)
-h2o.init()
+library(gbm)
 ```
 
 ## Date Preprocessing
@@ -193,5 +189,35 @@ fn <- sum(rf.pred == 0 & df.dat_full.test$Diabetes == 1)/
   sum(df.dat_full.test$Diabetes == 1)
 fp <- sum(rf.pred == 1 & df.dat_full.test$Diabetes == 0)/
   sum(df.dat_full.test$Diabetes == 0)
-paste("")
+
+varImpPlot(rf.final)
+```
+
+## Adaboost
+```{r cv adaboost}
+set.seed(240)
+
+# split validation set
+K <- 5
+cvSplit <- createFolds(y = df.dat_full.train$Diabetes, k = K)
+# list of M
+M <- seq(500, 1000, by = 50)
+cv.error <- matrix(nrow = K, ncol = length(M))
+for (k in 1: K){
+  for (i in 1: length(M)){
+    m <- M[i]
+    adaCV <- gbm(Diabetes~., 
+                 data = df.dat_full.train[-cvSplit[[k]], ], 
+                 distribution = "adaboost", 
+                 n.tree = m)
+    adaPred <- predict(adaCV, 
+                       newdata = df.dat_full.train[cvSplit[[k]], ],
+                       type = "response")
+    adaPred <- ifelse(adaPred >= 0.5, 1, 0)
+    cv.error[k, i] <- 
+      sum(adaPred != df.dat_full.train[cvSplit[[k]], "Diabetes"])/
+      nrow(df.dat_full.train[cvSplit[[k]], ])
+  }
+}
+
 ```
