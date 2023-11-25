@@ -18,6 +18,8 @@ library(rpart.plot)
 library(e1071)
 library(neuralnet)
 library(h2o)
+library(randomForest)
+library(MASS)
 h2o.init()
 ```
 
@@ -26,7 +28,7 @@ h2o.init()
 load("high_PCE_CAD_data.RData")
 ```
 
-```{r basic cleaning}
+```{r basic cleaning genetics}
 # take genetic cols and diabete (response) col
 df.genetics <- dat[, c(1: 531, 573)]
 # remove problematic columns
@@ -35,76 +37,161 @@ df.genetics <- base::Filter(function(x) all(x %in% c(0, 1, 2)), df.genetics)
 for (j in 1:ncol(df.genetics)){
   df.genetics[, j] <- factor(df.genetics[, j])
 }
-summary(df.genetics$Diabetes)
+```
+
+```{r basic cleaning habits}
+df.habit <- dat[, c(532:557, 561:566, 573)]
+df.habit$Diabetes <- factor(df.habit$Diabetes)
+colnames(df.habit)[c(5,6,7,27)] <- c("moderate_act", "vigorous_act", "walk", "cook")
+```
+
+```{r basic cleaning family history}
+start = which(colnames(dat) == "PCA40") +1
+end = length(dat)
+diabetes = as.data.frame(dat[, which(colnames(dat) == "Diabetes")])
+fam_hist = dat[, start:end]
+fam_hist["Diabetes"] <- diabetes
+fam_hist$Diabetes <- as.factor(fam_hist$Diabetes)
+
+any(is.na(fam_hist))
+fam_hist[fam_hist=="?"] <- NA
+fam_hist <- na.omit(fam_hist)
 ```
 
 ```{r MCA}
 # use MCA to reduce dimension for categorical data
-res.mca <- MCA(df.genetics[, 1: 115], graph = FALSE)
-ggplot(mapping = aes(x = seq(1:230), y = res.mca$eig[,3])) + 
+plot.mca <- MCA(df.genetics[, 1: 115], ncp = 200)
+ggplot(mapping = aes(x = seq(1:230), y = plot.mca$eig[,3])) + 
   geom_line(colour = "blue") +
   geom_point(size = 0.1, colour = "darkred") +
   ylab("% variance explained") + xlab("Dimension")
 ```
 
+
 ```{r split sets}
 # 80% training set and 20% testing set, split equally on diabetes
+set.seed(240)
+
 split <- partition(df.genetics$Diabetes, 
                    p = c(train = 0.8, test = 0.2))
+
 df.genetics.train <- df.genetics[split$train, ]
 df.genetics.test <- df.genetics[split$test, ]
-# validation split
-K <- 5
-cvSplit <- createFolds(df.genetics.train$Diabetes, k = K)
+
+df.habit.train <- df.habit[split$train, ]
+df.habit.test <- df.habit[split$test, ]
+
+df.fam_hist.train <- fam_hist[split$train, ]
+df.fam_hist.test <- fam_hist[split$test, ]
 ```
 
-```{r logistic regression with no penalty}
-val.accuracy <- c()
-for (k in 1: K){
-  glm.cv <- glm(Diabetes~., 
-                data = df.genetics.train[-cvSplit[[k]], ],
-                family = "binomial")
-  pred.cv <- predict(glm.cv, 
-                     newdata = df.genetics.train[cvSplit[[k]], ], 
-                     type = "response")
-  pred.cv <- as.numeric(pred.cv >= 0.5)
-  val.accuracy <- c(val.accuracy, sum(pred.cv == df.genetics.train[cvSplit[[k]], ]$Diabetes)/nrow(df.genetics.train[cvSplit[[k]], ]))
-}
-paste("Logistic Regression: ", val.accuracy)
+## Screening
+```{r covariate screening}
+set.seed(240)
+
+# fit into RF
+rf.genetics <- randomForest(Diabetes~., 
+                            data = df.genetics.train, ntree = 300)
+rf.habit <- randomForest(Diabetes~., 
+                            data = df.habit.train, ntree = 300)
+rf.fam_hist <- randomForest(Diabetes~., 
+                            data = df.fam_hist.train, ntree = 300)
+
+# Importance plot
+varImpPlot(rf.genetics)
+varImpPlot(rf.habit)
+varImpPlot(rf.fam_hist)
 ```
 
-```{r logistic regression with l1 penalty}
-val.accuracy <- c()
-for (k in 1: K){
-  glmnet.cv <- glmnet(x = df.genetics.train[-cvSplit[[k]], ][, 1: 115], 
-                y = df.genetics.train[-cvSplit[[k]], "Diabetes"],
-                family = "binomial",
-                alpha = 1)
-  pred.cv <- predict(glmnet.cv, 
-                     newx = data.matrix(df.genetics.train[cvSplit[[k]], ][, 1:115]),
-                     type = "response")
-  pred.cv <- as.numeric(pred.cv >= 0.5)
-  val.accuracy <- c(val.accuracy, sum(pred.cv == df.genetics.train[cvSplit[[k]], ]$Diabetes)/nrow(df.genetics.train[cvSplit[[k]], ]))
-}
-paste("Logistic Regression: ", val.accuracy)
+```{r final dataset after screening}
+df.dat_full <- cbind(df.habit[, 1:length(df.habit)-1], fam_hist)
+df.dat_full.train <- df.dat_full[split$train, ]
+df.dat_full.test <- df.dat_full[split$test, ]
 ```
 
-```{r tree}
-val.accuracy <- c()
-for (k in 1: K){
-  glm.cv <- rpart(Diabetes~., 
-                data = df.genetics.train[-cvSplit[[k]], ])
-  pred.cv <- predict(glm.cv, 
-                     newdata = df.genetics.train[cvSplit[[k]], ])
-}
+## Cross Validation
+```{r hyperparameter}
+set.seed(240)
+
+# find mtry and ntree
+rf.tune.200 <- tuneRF(df.dat_full.train[, -length(df.dat_full.train)],
+                  df.dat_full.train$Diabetes,
+                  ntreeTry = 200)
+rf.tune.300 <- tuneRF(df.dat_full.train[, -length(df.dat_full.train)],
+                  df.dat_full.train$Diabetes,
+                  ntreeTry = 300)
+rf.tune.400 <- tuneRF(df.dat_full.train[, -length(df.dat_full.train)],
+                  df.dat_full.train$Diabetes,
+                  ntreeTry = 400)
+rf.tune.500 <- tuneRF(df.dat_full.train[, -length(df.dat_full.train)],
+                  df.dat_full.train$Diabetes,
+                  ntreeTry = 500)
+rf.tune.350 <- tuneRF(df.dat_full.train[, -length(df.dat_full.train)],
+                  df.dat_full.train$Diabetes,
+                  ntreeTry = 350)
+rf.tune.250 <- tuneRF(df.dat_full.train[, -length(df.dat_full.train)],
+                  df.dat_full.train$Diabetes,
+                  ntreeTry = 250)
+rf.tune.450 <- tuneRF(df.dat_full.train[, -length(df.dat_full.train)],
+                  df.dat_full.train$Diabetes,
+                  ntreeTry = 450)
+
+df.oob <- data.frame(matrix(nrow = 7, ncol = 3))
+colnames(df.oob) <- c("ntree", "oob.score", "mtry")
+df.oob$ntree <- c(200, 250, 300, 350, 400, 450, 500)
+df.oob$mtry <- c(rf.tune.200[which(rf.tune.200[,2] == min(rf.tune.200[,2])), 1],
+                 rf.tune.250[which(rf.tune.250[,2] == min(rf.tune.250[,2])), 1],
+                 rf.tune.300[which(rf.tune.300[,2] == min(rf.tune.300[,2])), 1],
+                 rf.tune.350[which(rf.tune.350[,2] == min(rf.tune.350[,2])), 1],
+                 rf.tune.400[which(rf.tune.400[,2] == min(rf.tune.400[,2])), 1],
+                 rf.tune.450[which(rf.tune.450[,2] == min(rf.tune.450[,2])), 1],
+                 rf.tune.500[which(rf.tune.500[,2] == min(rf.tune.500[,2])), 1])
+df.oob$oob.score <- c(min(rf.tune.200[,2]), 
+                min(rf.tune.250[,2]), 
+                min(rf.tune.300[,2]),
+                min(rf.tune.350[,2]),
+                min(rf.tune.400[,2]),
+                min(rf.tune.450[,2]),
+                min(rf.tune.500[,2]))
+
+# plot
+ggplot(data = df.oob, aes(x = ntree, y = oob.score, label = mtry)) + 
+  geom_point() + 
+  geom_line() +
+  geom_text(vjust = -1) +
+  ylim(c(0.076, 0.0778)) +
+  xlab("Number of Trees") +
+  ylab("OOB Score") +
+  ggtitle("OOB Score vs. Number of Trees (labelled with optimal mtry)") +
+  theme(plot.title = element_text(hjust = 0.5))
 ```
 
-```{r cnn}
-#. transform to dummy
-df.genetics.train.h2o <- as.h2o(df.genetics.train)
-df.genetics.test.h2o <- as.h2o(df.genetics.test)
-cnn1 <- h2o.deeplearning(x = 1:115, y = 116, training_frame = df.genetics.train.h2o,
-                        loss = "CrossEntropy", hidden = rep(5,5,5,5),
-                        score_training_samples = 0,
-                        epochs = 10)
+## Final RF Model and test
+```{r random forest}
+set.seed(240)
+rf.final <- randomForest(Diabetes~., 
+                         data = df.dat_full.train, 
+                         mtry = 64, 
+                         ntree = 400)
+oob_score <- data.frame(
+  Trees=rep(1:nrow(rf.final$err.rate), times=3),
+  Type=rep(c('OOB_score', 'no diabetes', 'diabetes'), 
+           each=nrow(rf.final$err.rate)),
+  Error=c(rf.final$err.rate[, 'OOB'],
+    rf.final$err.rate[, '0'],
+    rf.final$err.rate[, '1']))
+
+ggplot(oob_score, aes(x=Trees, y=Error)) + geom_line(aes(color=Type))
+
+# prediction
+rf.pred <- predict(rf.final, newdata = df.dat_full.test)
+
+# compute test error
+error <- sum(rf.pred != df.dat_full.test$Diabetes)/
+  length(df.dat_full.test$Diabetes)
+fn <- sum(rf.pred == 0 & df.dat_full.test$Diabetes == 1)/
+  sum(df.dat_full.test$Diabetes == 1)
+fp <- sum(rf.pred == 1 & df.dat_full.test$Diabetes == 0)/
+  sum(df.dat_full.test$Diabetes == 0)
+paste("")
 ```
